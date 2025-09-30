@@ -3,9 +3,11 @@ package com.signify.hue.flutterreactiveble.ble
 import android.bluetooth.BluetoothDevice.BOND_BONDING
 import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import androidx.annotation.VisibleForTesting
+import androidx.core.content.ContextCompat
 import com.polidea.rxandroidble2.LogConstants
 import com.polidea.rxandroidble2.LogOptions
 import com.polidea.rxandroidble2.NotificationSetupMode
@@ -40,8 +42,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
     private val allConnections = CompositeDisposable()
 
     companion object {
-        // this needs to be in companion update since background isolates respawn the event channels
-        // Fix for https://github.com/PhilipsHue/flutter_reactive_ble/issues/277
         private val connectionUpdateBehaviorSubject: BehaviorSubject<ConnectionUpdate> =
             BehaviorSubject.create()
 
@@ -58,9 +58,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
         rxBleClient = RxBleClient.create(context)
     }
 
-    /*yes spread operator is not performant but after kotlin v1.60 it is less bad and it is also the
-    recommended way to call varargs in java https://kotlinlang.org/docs/reference/java-interop.html#java-varargs
-     */
     @Suppress("SpreadOperator")
     override fun scanForDevices(
         services: List<ParcelUuid>,
@@ -110,8 +107,7 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
             getConnection(deviceId, timeout)
                 .subscribe({ result ->
                     when (result) {
-                        is EstablishedConnection -> {
-                        }
+                        is EstablishedConnection -> {}
                         is EstablishConnectionFailure -> {
                             connectionUpdateBehaviorSubject.onNext(
                                 ConnectionUpdateError(
@@ -125,8 +121,7 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     connectionUpdateBehaviorSubject.onNext(
                         ConnectionUpdateError(
                             deviceId,
-                            error?.message
-                                ?: "unknown error",
+                            error?.message ?: "unknown error",
                         ),
                     )
                 }),
@@ -150,8 +145,9 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
     override fun discoverServices(deviceId: String): Single<RxBleDeviceServices> {
         return getConnection(deviceId).flatMapSingle { connectionResult ->
             when (connectionResult) {
-                is EstablishedConnection ->
-                    if (rxBleClient.getBleDevice(connectionResult.deviceId).bluetoothDevice.bondState == BOND_BONDING) {
+                is EstablishedConnection -> {
+                    val bondState = getBondStateSafe(connectionResult.deviceId)
+                    if (bondState == BOND_BONDING) {
                         Single.error(
                             Exception(
                                 "Bonding is in progress wait for bonding to be finished before executing more operations on the device",
@@ -160,6 +156,7 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     } else {
                         connectionResult.rxConnection.discoverServices()
                     }
+                }
                 is EstablishConnectionFailure -> Single.error(Exception(connectionResult.errorMessage))
             }
         }.firstOrError()
@@ -178,12 +175,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                         characteristicInstanceId,
                     ).flatMap { c: BluetoothGattCharacteristic ->
                         connectionResult.rxConnection.readCharacteristic(c)
-                                /*
-                                On Android7 the ble stack frequently gives incorrectly
-                                the error GAT_AUTH_FAIL(137) when reading char that will establish
-                                the bonding with the peripheral. By retrying the operation once we
-                                deviate between this flaky one time error and real auth failed cases
-                                 */
                             .retry(1) { Build.VERSION.SDK_INT < Build.VERSION_CODES.O }
                             .map { value ->
                                 CharOperationSuccessful(deviceId, value.asList())
@@ -241,7 +232,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     characteristicInstanceId,
                 )
             }
-            // now we have setup the subscription and we want the actual value
             .flatMap { notificationObservable ->
                 notificationObservable
             }
@@ -256,7 +246,6 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                 is EstablishedConnection ->
                     connectionResult.rxConnection.requestMtu(size)
                         .map { value -> MtuNegotiateSuccessful(deviceId, value) }
-
                 is EstablishConnectionFailure ->
                     Single.just(
                         MtuNegotiateFailed(
@@ -325,7 +314,8 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
     ): Observable<Observable<ByteArray>> =
         when (deviceConnection) {
             is EstablishedConnection -> {
-                if (rxBleClient.getBleDevice(deviceConnection.deviceId).bluetoothDevice.bondState == BOND_BONDING) {
+                val bondState = getBondStateSafe(deviceConnection.deviceId)
+                if (bondState == BOND_BONDING) {
                     Observable.error(
                         Exception("Bonding is in progress wait for bonding to be finished before executing more operations on the device"),
                     )
@@ -387,14 +377,13 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                 }
                 is EstablishConnectionFailure ->
                     Single.error(
-                        java.lang.IllegalStateException(
+                        IllegalStateException(
                             "Reading RSSI failed. Device is not connected",
                         ),
                     )
             }
         }.firstOrError()
 
-    // enable this for extra debug output on the android stack
     private fun enableDebugLogging() =
         RxBleClient
             .updateLogOptions(
@@ -404,4 +393,26 @@ open class ReactiveBleClient(private val context: Context) : BleClient {
                     .setShouldLogAttributeValues(true)
                     .build(),
             )
+
+    private fun getBondStateSafe(deviceId: String): Int {
+        return try {
+            val device = rxBleClient.getBleDevice(deviceId).bluetoothDevice
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        android.Manifest.permission.BLUETOOTH_CONNECT,
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    device.bondState
+                } else {
+                    // Permission denied → treat as not bonded
+                    -1
+                }
+            } else {
+                device.bondState
+            }
+        } catch (e: SecurityException) {
+            -1
+        }
+    }
 }
