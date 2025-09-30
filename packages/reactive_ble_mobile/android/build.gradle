@@ -13,11 +13,11 @@ buildscript {
     }
 
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.0.2'
-        classpath 'com.google.protobuf:protobuf-gradle-plugin:0.9.4'
+        classpath 'com.android.tools.build:gradle:8.11.2'
+        classpath 'com.google.protobuf:protobuf-gradle-plugin:0.9.5'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath "io.gitlab.arturbosch.detekt:detekt-gradle-plugin:$detekt_version"
-        classpath "de.mannodermaus.gradle.plugins:android-junit5:1.7.1.1"
+        classpath "de.mannodermaus.gradle.plugins:android-junit5:1.13.4.0"
     }
 }
 
